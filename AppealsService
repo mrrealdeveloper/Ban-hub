@@ -1,0 +1,315 @@
+-- ServerScriptService/AppealsService
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DataStoreService = game:GetService("DataStoreService")
+local HttpService = game:GetService("HttpService")
+
+
+-- =========================================================
+-- CONFIG
+-- =========================================================
+--]]
+-- PUT YOUR DISCORD WEBHOOK HERE (SERVER ONLY!)
+local DISCORD_WEBHOOK_URL = "YOUR DISCORD WEBHOOK"
+
+-- Admins
+local ADMINS = {
+-- Enter your username ID	
+[123456789] = true,
+}
+
+-- Cooldown
+local APPEAL_COOLDOWN_SECONDS = 60 * 24 * 60 * 60 -- 60 days
+
+-- Text limits
+local MAX_BAN_REASON = 120
+local MAX_UNBAN_REASON = 300
+
+-- DataStores
+local AppealsStore = DataStoreService:GetDataStore("BanAppeals_v5")
+local IndexStore = DataStoreService:GetDataStore("BanAppeals_Index_v5")
+
+-- Remotes
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+
+local SubmitAppeal = Remotes:WaitForChild("SubmitAppeal") :: RemoteEvent
+local GetAppealCooldown = Remotes:WaitForChild("GetAppealCooldown") :: RemoteFunction
+local GetAppeals = Remotes:WaitForChild("GetAppeals") :: RemoteFunction
+local SetAppealStatus = Remotes:WaitForChild("SetAppealStatus") :: RemoteEvent
+local GetMyAppeal = Remotes:WaitForChild("GetMyAppeal") :: RemoteFunction
+
+-- =========================================================
+-- HELPERS
+-- =========================================================
+
+local function isAdmin(player: Player): boolean
+	return ADMINS[player.UserId] == true
+end
+
+local function appealKey(userId: number): string
+	return "u_" .. tostring(userId)
+end
+
+local function sanitize(text: any, maxLen: number): string
+	text = tostring(text or "")
+	text = text:gsub("[%c]", "") -- remove control characters
+	if #text > maxLen then
+		text = text:sub(1, maxLen)
+	end
+	return text
+end
+
+local function addToIndex(userId: number)
+	pcall(function()
+		IndexStore:UpdateAsync("all", function(old)
+			old = old or {}
+			old[tostring(userId)] = true
+			return old
+		end)
+	end)
+end
+
+local function webhookReady(): boolean
+	return DISCORD_WEBHOOK_URL ~= nil
+		and DISCORD_WEBHOOK_URL ~= ""
+		and not DISCORD_WEBHOOK_URL:find("PUT_WEBHOOK_URL_HERE", 1, true)
+end
+
+local function postDiscordWebhook(payloadTable)
+	if not webhookReady() then
+		warn("Discord webhook URL not set. Skipping webhook.")
+		return
+	end
+
+	local ok, err = pcall(function()
+		HttpService:PostAsync(
+			DISCORD_WEBHOOK_URL,
+			HttpService:JSONEncode(payloadTable),
+			Enum.HttpContentType.ApplicationJson
+		)
+	end)
+
+	if not ok then
+		warn("Discord webhook failed:", err)
+	end
+end
+
+local function sendPendingWebhook(record)
+	local payload = {
+		username = "Ban Appeal Bot",
+		embeds = {{
+			title = "New Ban Appeal (PENDING)",
+			description = string.format(
+				"User: **%s** (%d)\nStatus: **PENDING **",
+				tostring(record.username or "unknown"),
+				tonumber(record.userId or 0)
+			),
+			fields = {
+				{ name = "Ban Reason", value = tostring(record.banReason or ""), inline = false },
+				{ name = "Unban Reason", value = tostring(record.unbanReason or ""), inline = false },
+			},
+			timestamp = DateTime.now():ToIsoDate(),
+		}}
+	}
+
+	postDiscordWebhook(payload)
+end
+
+local function sendDecisionWebhook(record, newStatus: string, adminPlayer: Player)
+	local statusWord = (newStatus == "approved") and "ACCEPTED" or "DECLINED"
+
+	local payload = {
+		username = "Ban Appeal Bot",
+		embeds = {{
+			title = "Ban Appeal " .. statusWord,
+			description = string.format(
+				"User: **%s** (%d)\nResult: **%s**\nAdmin: **%s** (%d)",
+				tostring(record.username or "unknown"),
+				tonumber(record.userId or 0),
+				statusWord,
+				adminPlayer.Name,
+				adminPlayer.UserId
+			),
+			fields = {
+				{ name = "Ban Reason", value = tostring(record.banReason or ""), inline = false },
+				{ name = "Unban Reason", value = tostring(record.unbanReason or ""), inline = false },
+			},
+			timestamp = DateTime.now():ToIsoDate(),
+		}}
+	}
+
+	postDiscordWebhook(payload)
+end
+
+-- =========================================================
+-- 1) PLAYER SUBMITS APPEAL  (fires PENDING webhook)
+-- =========================================================
+
+SubmitAppeal.OnServerEvent:Connect(function(player: Player, banReason: string, unbanReason: string)
+	if typeof(banReason) ~= "string" or typeof(unbanReason) ~= "string" then
+		return
+	end
+
+	local now = os.time()
+	local key = appealKey(player.UserId)
+
+	-- Cooldown check (based on last submittedAt)
+	local okGet, existing = pcall(function()
+		return AppealsStore:GetAsync(key)
+	end)
+
+	if okGet and existing and typeof(existing.submittedAt) == "number" then
+		local elapsed = now - existing.submittedAt
+		local remaining = APPEAL_COOLDOWN_SECONDS - elapsed
+		if remaining > 0 then
+			local days = math.ceil(remaining / 86400)
+			SubmitAppeal:FireClient(player, false, "You must wait " .. days .. " more day(s) before appealing again.")
+			return
+		end
+	end
+
+	local record = {
+		userId = player.UserId,
+		username = player.Name,
+		submittedAt = now,
+		updatedAt = now,
+		status = "pending", -- pending | approved | denied
+		banReason = sanitize(banReason, MAX_BAN_REASON),
+		unbanReason = sanitize(unbanReason, MAX_UNBAN_REASON),
+	}
+
+	-- Save appeal
+	local okSet, err = pcall(function()
+		AppealsStore:SetAsync(key, record)
+	end)
+
+	if not okSet then
+		warn("SubmitAppeal failed:", err)
+		SubmitAppeal:FireClient(player, false, "Failed to submit appeal. Try again later.")
+		return
+	end
+
+	addToIndex(player.UserId)
+
+	-- ✅ PENDING webhook AFTER successful save
+	sendPendingWebhook(record)
+
+	SubmitAppeal:FireClient(player, true, "Appeal submitted! Status: PENDING ⏳")
+end)
+
+-- =========================================================
+-- 2) PLAYER COOLDOWN (for countdown UI)
+-- =========================================================
+
+GetAppealCooldown.OnServerInvoke = function(player: Player)
+	local ok, appeal = pcall(function()
+		return AppealsStore:GetAsync(appealKey(player.UserId))
+	end)
+
+	if not ok or not appeal or typeof(appeal.submittedAt) ~= "number" then
+		return 0
+	end
+
+	local remaining = APPEAL_COOLDOWN_SECONDS - (os.time() - appeal.submittedAt)
+	return math.max(0, remaining)
+end
+
+-- =========================================================
+-- 3) PLAYER STATUS (shows pending/approved/denied)
+-- =========================================================
+
+GetMyAppeal.OnServerInvoke = function(player: Player)
+	local ok, appeal = pcall(function()
+		return AppealsStore:GetAsync(appealKey(player.UserId))
+	end)
+
+	if not ok or not appeal then
+		return { ok = true, exists = false }
+	end
+
+	return {
+		ok = true,
+		exists = true,
+		status = appeal.status or "pending",
+		submittedAt = appeal.submittedAt or 0,
+	}
+end
+
+-- =========================================================
+-- 4) ADMIN LOADS ALL APPEALS
+-- =========================================================
+
+GetAppeals.OnServerInvoke = function(player: Player)
+	if not isAdmin(player) then
+		return { ok = false, message = "Not authorized." }
+	end
+
+	local okIndex, index = pcall(function()
+		return IndexStore:GetAsync("all")
+	end)
+
+	if not okIndex then
+		return { ok = false, message = "Failed to load appeal index." }
+	end
+
+	index = index or {}
+	local appeals = {}
+
+	for userIdStr in pairs(index) do
+		local okA, appeal = pcall(function()
+			return AppealsStore:GetAsync("u_" .. userIdStr)
+		end)
+		if okA and appeal then
+			table.insert(appeals, appeal)
+		end
+	end
+
+	table.sort(appeals, function(a, b)
+		return (a.submittedAt or 0) > (b.submittedAt or 0)
+	end)
+
+	return { ok = true, appeals = appeals }
+end
+
+-- =========================================================
+-- 5) ADMIN APPROVE/DENY (fires ACCEPTED/DECLINED webhook)
+-- =========================================================
+
+SetAppealStatus.OnServerEvent:Connect(function(player: Player, targetUserId: number, newStatus: string)
+	if not isAdmin(player) then return end
+	if typeof(targetUserId) ~= "number" then return end
+
+	newStatus = tostring(newStatus or ""):lower()
+	if newStatus ~= "approved" and newStatus ~= "denied" then return end
+
+	local key = appealKey(targetUserId)
+
+	-- Get old record first (for webhook + anti-spam)
+	local okGet, old = pcall(function()
+		return AppealsStore:GetAsync(key)
+	end)
+	if not okGet or not old then return end
+
+	-- Prevent re-sending same decision
+	if tostring(old.status or "pending"):lower() == newStatus then
+		return
+	end
+
+	-- Update record
+	local okUpdate, updateErr = pcall(function()
+		AppealsStore:UpdateAsync(key, function(record)
+			if not record then return nil end
+			record.status = newStatus
+			record.updatedAt = os.time()
+			return record
+		end)
+	end)
+
+	if not okUpdate then
+		warn("SetAppealStatus update failed:", updateErr)
+		return
+	end
+
+	-- ✅ Decision webhook after successful update
+	sendDecisionWebhook(old, newStatus, player)
+end)

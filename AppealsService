@@ -1,4 +1,4 @@
--- ServerScriptService/AppealsService
+-- Put this script in ServerScriptService
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
@@ -9,7 +9,7 @@ local HttpService = game:GetService("HttpService")
 -- CONFIG
 -- =========================================================
 --]]
--- PUT YOUR DISCORD WEBHOOK HERE (SERVER ONLY!)
+-- Put your Discord webhook URL here
 local DISCORD_WEBHOOK_URL = "YOUR DISCORD WEBHOOK"
 
 -- Admins
@@ -21,7 +21,7 @@ local ADMINS = {
 -- Cooldown
 local APPEAL_COOLDOWN_SECONDS = 60 * 24 * 60 * 60 -- 60 days
 
--- Text limits
+-- Text limits in characters (Change this if you want)
 local MAX_BAN_REASON = 120
 local MAX_UNBAN_REASON = 300
 
@@ -142,7 +142,7 @@ local function sendDecisionWebhook(record, newStatus: string, adminPlayer: Playe
 end
 
 -- =========================================================
--- 1) PLAYER SUBMITS APPEAL  (fires PENDING webhook)
+-- PLAYER SUBMITS APPEAL
 -- =========================================================
 
 SubmitAppeal.OnServerEvent:Connect(function(player: Player, banReason: string, unbanReason: string)
@@ -191,14 +191,13 @@ SubmitAppeal.OnServerEvent:Connect(function(player: Player, banReason: string, u
 
 	addToIndex(player.UserId)
 
-	-- ✅ PENDING webhook AFTER successful save
 	sendPendingWebhook(record)
 
 	SubmitAppeal:FireClient(player, true, "Appeal submitted! Status: PENDING ⏳")
 end)
 
 -- =========================================================
--- 2) PLAYER COOLDOWN (for countdown UI)
+-- PLAYER COOLDOWN (for countdown UI)
 -- =========================================================
 
 GetAppealCooldown.OnServerInvoke = function(player: Player)
@@ -215,7 +214,7 @@ GetAppealCooldown.OnServerInvoke = function(player: Player)
 end
 
 -- =========================================================
--- 3) PLAYER STATUS (shows pending/approved/denied)
+-- PLAYER STATUS (shows pending/approved/denied)
 -- =========================================================
 
 GetMyAppeal.OnServerInvoke = function(player: Player)
@@ -272,7 +271,7 @@ GetAppeals.OnServerInvoke = function(player: Player)
 end
 
 -- =========================================================
--- 5) ADMIN APPROVE/DENY (fires ACCEPTED/DECLINED webhook)
+-- ADMIN APPROVE/DENY
 -- =========================================================
 
 SetAppealStatus.OnServerEvent:Connect(function(player: Player, targetUserId: number, newStatus: string)
